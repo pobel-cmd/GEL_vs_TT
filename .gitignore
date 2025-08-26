@@ -1,0 +1,25 @@
+# Dossiers Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Environnements virtuels
+.venv/
+env/
+venv/
+ENV/
+
+# Fichiers CSV temporaires
+*.csv
+
+# Fichiers de logs
+*.log
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# Configs locales
+*.env
