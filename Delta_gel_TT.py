@@ -2,18 +2,13 @@ from flask import Flask, request, jsonify
 import pandas as pd
 import requests
 import os
-import hashlib
 
 app = Flask(__name__)
 
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# Colonnes à comparer
-COMPARE_COLS = ["Nature","Nom","Prenom","Date_de_naissance","Alias"]
-
 def download_csv(url, filename):
-    """Télécharge un CSV depuis Google Drive ou autre URL"""
     r = requests.get(url)
     r.raise_for_status()
     path = os.path.join(TMP_DIR, filename)
@@ -21,51 +16,51 @@ def download_csv(url, filename):
         f.write(r.content)
     return path
 
-def hash_row(row):
-    """Créer un hash pour une ligne pandas"""
-    row_str = '|'.join([str(row[c]) if c in row else '' for c in COMPARE_COLS])
-    return hashlib.md5(row_str.encode('utf-8')).hexdigest()
-
 def compare_csv(gel_path, tt_path):
-    """Compare les CSV via hash et retourne uniquement les modifications"""
-    df_gel = pd.read_csv(gel_path, usecols=["IdRegistre"] + COMPARE_COLS, dtype=str)
-    df_tt  = pd.read_csv(tt_path,  usecols=["IdRegistre"] + COMPARE_COLS, dtype=str)
+    df_gel = pd.read_csv(gel_path)
+    df_tt = pd.read_csv(tt_path)
 
-    # Créer un hash de comparaison
-    df_gel["row_hash"] = df_gel.apply(hash_row, axis=1)
-    df_tt["row_hash"]  = df_tt.apply(hash_row, axis=1)
+    # Supprimer Date_Publication
+    if "Date_Publication" in df_gel.columns:
+        df_gel = df_gel.drop(columns=["Date_Publication"])
+    if "Date_Publication" in df_tt.columns:
+        df_tt = df_tt.drop(columns=["Date_Publication"])
 
-    # Left join sur IdRegistre
-    df_merged = df_gel.merge(df_tt[["IdRegistre","row_hash"]], on="IdRegistre", how="left", suffixes=("_gel","_tt"))
+    # Fusion sur IdRegistre
+    df_merged = df_gel.merge(df_tt, on="IdRegistre", how="left", suffixes=("_gel", "_tt"))
+    
+    # Colonnes à comparer
+    compare_cols = [c for c in df_gel.columns if c != "IdRegistre"]
+    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
+    df_diff = df_merged[mask]
 
-    # Sélectionner uniquement les lignes modifiées ou nouvelles
-    df_diff = df_merged[df_merged["row_hash_tt"].isna() | (df_merged["row_hash_gel"] != df_merged["row_hash_tt"])]
+    # Créer le DataFrame des modifs
+    df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
+    df_modif.columns = ["IdRegistre"] + compare_cols
 
-    df_modif = df_diff[["IdRegistre"] + COMPARE_COLS]
-
-    modif_path = os.path.join(TMP_DIR, "modifications.csv")
-    df_modif.to_csv(modif_path, index=False)
-    return modif_path
+    return df_modif
 
 @app.route("/compare", methods=["POST"])
 def compare_endpoint():
     data = request.get_json()
     gel_url = data.get("gel_csv_url")
-    tt_url  = data.get("tt_csv_url")
+    tt_url = data.get("tt_csv_url")
 
     if not gel_url or not tt_url:
         return jsonify({"error": "Missing gel_csv_url or tt_csv_url"}), 400
 
     try:
         gel_path = download_csv(gel_url, "gel.csv")
-        tt_path  = download_csv(tt_url, "tt.csv")
-        modif_path = compare_csv(gel_path, tt_path)
+        tt_path = download_csv(tt_url, "tt.csv")
+        df_modif = compare_csv(gel_path, tt_path)
 
-        # Pour l'instant, on renvoie juste le chemin local
+        # Convertir en liste de dictionnaires pour JSON
+        modifications = df_modif.to_dict(orient="records")
+        
         return jsonify({
             "status": "ok",
             "message": "Comparaison terminée",
-            "modifications_file": modif_path
+            "modifications": modifications
         })
 
     except Exception as e:
