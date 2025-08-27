@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 import pandas as pd
 import requests
 import os
@@ -13,46 +13,44 @@ GEL_URL = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/ma
 TT_URL  = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-TT.csv"
 
 def download_csv(url, filename):
-    """Télécharge un CSV depuis GitHub et le sauvegarde temporairement"""
+    path = os.path.join(TMP_DIR, filename)
     try:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
+        with open(path, "wb") as f:
+            f.write(r.content)
     except Exception as e:
         raise ValueError(f"Erreur lors du téléchargement de {url}: {e}")
-    
-    path = os.path.join(TMP_DIR, filename)
-    with open(path, "wb") as f:
-        f.write(r.content)
     return path
 
 def compare_csv(gel_path, tt_path):
-    """Compare les deux CSV et retourne les modifications"""
-    try:
-        df_gel = pd.read_csv(gel_path, dtype=str).fillna("")
-        df_tt  = pd.read_csv(tt_path, dtype=str).fillna("")
-    except Exception as e:
-        raise ValueError(f"Impossible de lire les CSV: {e}")
+    """Compare deux CSV et retourne les modifications"""
+    df_gel = pd.read_csv(gel_path)
+    df_tt  = pd.read_csv(tt_path)
 
-    # Normalisation : enlever espaces autour des textes
-    df_gel = df_gel.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-    df_tt  = df_tt.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    # Colonnes à comparer
+    required_cols = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
 
-    required_gel = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
-    required_tt  = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
+    # Vérification des colonnes
+    for col in required_cols:
+        if col not in df_gel.columns:
+            raise ValueError(f"Colonne manquante dans GEL: {col}")
+        if col not in df_tt.columns:
+            raise ValueError(f"Colonne manquante dans TT: {col}")
 
-    if not all(c in df_gel.columns for c in required_gel):
-        raise ValueError(f"Colonnes manquantes dans GEL: {required_gel}")
-    if not all(c in df_tt.columns for c in required_tt):
-        raise ValueError(f"Colonnes manquantes dans TT: {required_tt}")
+    # Remplacer NaN par une valeur vide pour comparaison
+    df_gel_filled = df_gel.fillna("")
+    df_tt_filled  = df_tt.fillna("")
 
-    # Fusion stricte sur IdRegistre
-    df_merged = df_gel.merge(df_tt, on="IdRegistre", how="outer", suffixes=("_gel", "_tt"))
+    # Fusion sur IdRegistre
+    df_merged = pd.merge(df_gel_filled, df_tt_filled, on="IdRegistre", how="left", suffixes=("_gel","_tt"))
 
+    # Masque pour détecter les différences
     compare_cols = ["Nom", "Prenom", "Date_de_naissance"]
     mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
 
+    # DataFrame des modifications
     df_diff = df_merged[mask]
-
     df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
 
@@ -64,24 +62,14 @@ def home():
 
 @app.route("/compare", methods=["POST"])
 def compare_endpoint():
-    """Compare les CSV et renvoie les modifications en JSON"""
     try:
         gel_path = download_csv(GEL_URL, "gel.csv")
         tt_path  = download_csv(TT_URL, "tt.csv")
         df_modif = compare_csv(gel_path, tt_path)
 
-        # Conversion en dictionnaire JSON-safe (remplace NaN par None → null en JSON)
-        df_modif = df_modif.where(pd.notnull(df_modif), None)
         modifications = df_modif.to_dict(orient="records")
-
-        return jsonify({
-            "status": "ok",
-            "message": "Comparaison terminée",
-            "modifications": modifications
-        })
-
+        return jsonify({"status": "ok", "message": "Comparaison terminée", "modifications": modifications})
     except Exception as e:
-        # Retour JSON en cas d'erreur, pour éviter 500
         return jsonify({"status": "error", "message": str(e)}), 200
 
 if __name__ == "__main__":
