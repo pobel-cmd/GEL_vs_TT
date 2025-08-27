@@ -8,61 +8,69 @@ app = Flask(__name__)
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
+# URLs des CSV sur GitHub
+GEL_URL = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-GEL.csv"
+TT_URL  = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-TT.csv"
+
 def download_csv(url, filename):
-    """Télécharge un CSV depuis Google Drive (lien direct)"""
-    r = requests.get(url)
-    r.raise_for_status()
+    """Télécharge un CSV depuis GitHub et le sauvegarde temporairement"""
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        raise ValueError(f"Erreur lors du téléchargement de {url}: {e}")
+    
     path = os.path.join(TMP_DIR, filename)
     with open(path, "wb") as f:
         f.write(r.content)
     return path
 
 def compare_csv(gel_path, tt_path):
-    """Compare les CSV et retourne uniquement les modifications"""
-    df_gel = pd.read_csv(gel_path)
-    df_tt = pd.read_csv(tt_path)
+    """Compare les deux CSV et retourne les modifications"""
+    try:
+        df_gel = pd.read_csv(gel_path)
+        df_tt  = pd.read_csv(tt_path)
+    except Exception as e:
+        raise ValueError(f"Impossible de lire les CSV: {e}")
 
-    # Normaliser les noms de colonnes pour éviter les espaces et majuscules
-    df_gel.columns = df_gel.columns.str.strip()
-    df_tt.columns = df_tt.columns.str.strip()
+    # Vérification des colonnes essentielles
+    required_gel = ["Id registre", "Nom", "Prenom", "Date de naissance"]
+    required_tt  = ["RowId", "Id registre", "Nom", "Prenom", "Date de naissance"]
 
-    # Supprimer la colonne Date_Publication
-    for col in ["Date_Publication", "Date publication", "Date dernière publication"]:
-        if col in df_gel.columns:
-            df_gel = df_gel.drop(columns=[col])
-        if col in df_tt.columns:
-            df_tt = df_tt.drop(columns=[col])
+    if not all(c in df_gel.columns for c in required_gel):
+        raise ValueError(f"Colonnes manquantes dans GEL: {required_gel}")
+    if not all(c in df_tt.columns for c in required_tt):
+        raise ValueError(f"Colonnes manquantes dans TT: {required_tt}")
 
-    # Fusionner sur IdRegistre
-    key_col = "Id registre"  # colonne clé dans les deux CSV
-    df_merged = df_gel.merge(df_tt, on=key_col, how="left", suffixes=("_gel", "_tt"))
+    # Fusion sur Id registre
+    df_merged = df_gel.merge(df_tt, on="Id registre", how="left", suffixes=("_gel", "_tt"))
 
     # Colonnes à comparer
-    compare_cols = [c for c in df_gel.columns if c != key_col]
-    mask = (df_merged[[c + "_gel" for c in compare_cols]] != df_merged[[c + "_tt" for c in compare_cols]]).any(axis=1)
+    compare_cols = ["Nom", "Prenom", "Date de naissance"]
+    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
+
     df_diff = df_merged[mask]
 
-    # Construire DataFrame final des modifications
-    df_modif = df_diff[[key_col] + [c + "_gel" for c in compare_cols]]
-    df_modif.columns = [key_col] + compare_cols
+    # DataFrame final des modifications
+    df_modif = df_diff[["Id registre"] + [c+"_gel" for c in compare_cols]]
+    df_modif.columns = ["Id registre"] + compare_cols
+
     return df_modif
+
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ API Delta_gel_TT is running!"
 
 @app.route("/compare", methods=["POST"])
 def compare_endpoint():
-    data = request.get_json()
-    gel_url = data.get("gel_csv_url")
-    tt_url = data.get("tt_csv_url")
-
-    if not gel_url or not tt_url:
-        return jsonify({"error": "Missing gel_csv_url or tt_csv_url"}), 400
-
+    """Compare les CSV et renvoie les modifications en JSON"""
     try:
-        gel_path = download_csv(gel_url, "gel.csv")
-        tt_path = download_csv(tt_url, "tt.csv")
+        gel_path = download_csv(GEL_URL, "gel.csv")
+        tt_path  = download_csv(TT_URL, "tt.csv")
         df_modif = compare_csv(gel_path, tt_path)
 
-        # Retourner les modifications sous forme JSON
         modifications = df_modif.to_dict(orient="records")
+
         return jsonify({
             "status": "ok",
             "message": "Comparaison terminée",
@@ -70,11 +78,8 @@ def compare_endpoint():
         })
 
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ API Delta_gel_TT is running!"
+        # Retour JSON en cas d'erreur, pour éviter 500
+        return jsonify({"status": "error", "message": str(e)}), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
