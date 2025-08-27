@@ -72,6 +72,9 @@ def compare_endpoint():
         tt_path  = download_csv(TT_URL, "tt.csv")
         df_modif = compare_csv(gel_path, tt_path)
 
+        # Conversion en dictionnaire JSON-safe (remplace NaN par None → null)
+        modifications = df_modif.where(pd.notnull(df_modif), None
+
         modifications = df_modif.to_dict(orient="records")
 
         return jsonify({
