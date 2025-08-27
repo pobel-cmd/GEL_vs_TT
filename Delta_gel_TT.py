@@ -47,12 +47,15 @@ def compare_csv(gel_path, tt_path):
 
     # Colonnes à comparer
     compare_cols = ["Nom", "Prenom", "Date_de_naissance"]
-    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
+
+    mask = False
+    for col in compare_cols:
+        mask = mask | (df_merged[f"{col}_gel"] != df_merged[f"{col}_tt"])
 
     df_diff = df_merged[mask]
 
     # DataFrame final des modifications
-    df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
+    df_modif = df_diff[["IdRegistre"] + [f"{c}_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
 
     return df_modif
