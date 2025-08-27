@@ -35,7 +35,7 @@ def compare_csv(gel_path, tt_path):
 
     # Vérification des colonnes essentielles
     required_gel = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
-    required_tt  = ["RowId", "IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
+    required_tt  = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
 
     if not all(c in df_gel.columns for c in required_gel):
         raise ValueError(f"Colonnes manquantes dans GEL: {required_gel}")
