@@ -24,14 +24,11 @@ def download_csv(url, filename):
     return path
 
 def compare_csv(gel_path, tt_path):
-    """Compare deux CSV et retourne les modifications"""
     df_gel = pd.read_csv(gel_path)
     df_tt  = pd.read_csv(tt_path)
 
-    # Colonnes à comparer
     required_cols = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
 
-    # Vérification des colonnes
     for col in required_cols:
         if col not in df_gel.columns:
             raise ValueError(f"Colonne manquante dans GEL: {col}")
@@ -43,14 +40,17 @@ def compare_csv(gel_path, tt_path):
     df_tt_filled  = df_tt.fillna("")
 
     # Fusion sur IdRegistre
-    df_merged = pd.merge(df_gel_filled, df_tt_filled, on="IdRegistre", how="left", suffixes=("_gel","_tt"))
+    df_merged = pd.merge(df_gel_filled, df_tt_filled, on="IdRegistre", how="outer", suffixes=("_gel","_tt"))
 
-    # Masque pour détecter les différences
     compare_cols = ["Nom", "Prenom", "Date_de_naissance"]
+    
+    # Créer un masque pour détecter les différences
     mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
 
-    # DataFrame des modifications
+    # Filtrer uniquement les lignes où il y a au moins une différence
     df_diff = df_merged[mask]
+
+    # Préparer le JSON final
     df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
 
