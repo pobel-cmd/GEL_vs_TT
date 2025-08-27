@@ -1,81 +1,68 @@
 from flask import Flask, request, jsonify
 import pandas as pd
+import requests
 import os
-import io
-import json
-
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
 
-# Lecture de la clé JSON du compte service depuis la variable d'environnement
-SERVICE_KEY_JSON = os.environ.get("GOOGLE_SERVICE_KEY")
-if not SERVICE_KEY_JSON:
-    raise RuntimeError("La variable d'environnement GOOGLE_SERVICE_KEY n'est pas définie.")
+TMP_DIR = "/tmp"
+os.makedirs(TMP_DIR, exist_ok=True)
 
-SERVICE_ACCOUNT_INFO = json.loads(SERVICE_KEY_JSON)
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-CREDENTIALS = service_account.Credentials.from_service_account_info(
-    SERVICE_ACCOUNT_INFO, scopes=SCOPES
-)
-DRIVE_SERVICE = build("drive", "v3", credentials=CREDENTIALS)
+def download_csv(url, filename):
+    """Télécharge un CSV depuis Google Drive (lien direct)"""
+    r = requests.get(url)
+    r.raise_for_status()
+    path = os.path.join(TMP_DIR, filename)
+    with open(path, "wb") as f:
+        f.write(r.content)
+    return path
 
-def download_csv_from_drive(file_id):
-    """Télécharge un fichier CSV depuis Google Drive et retourne un DataFrame pandas"""
-    request_drive = DRIVE_SERVICE.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request_drive)
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-    fh.seek(0)
-    df = pd.read_csv(fh)
-    return df
+def compare_csv(gel_path, tt_path):
+    """Compare les CSV et retourne uniquement les modifications"""
+    df_gel = pd.read_csv(gel_path)
+    df_tt = pd.read_csv(tt_path)
 
-def compare_csv(df_gel, df_tt):
-    """Compare les deux DataFrame et retourne les modifications"""
-    # Supprimer les colonnes publication pour ne pas générer de faux delta
-    for col in ["Date Publication", "Date dernière publication", "Date_publication"]:
+    # Normaliser les noms de colonnes pour éviter les espaces et majuscules
+    df_gel.columns = df_gel.columns.str.strip()
+    df_tt.columns = df_tt.columns.str.strip()
+
+    # Supprimer la colonne Date_Publication
+    for col in ["Date_Publication", "Date publication", "Date dernière publication"]:
         if col in df_gel.columns:
             df_gel = df_gel.drop(columns=[col])
         if col in df_tt.columns:
             df_tt = df_tt.drop(columns=[col])
 
-    # Harmoniser le nom de colonne clé
-    if "ID registre" in df_gel.columns:
-        df_gel.rename(columns={"ID registre": "IdRegistre"}, inplace=True)
-    if "ID registre" in df_tt.columns:
-        df_tt.rename(columns={"ID registre": "IdRegistre"}, inplace=True)
-
     # Fusionner sur IdRegistre
-    df_merged = df_gel.merge(df_tt, on="IdRegistre", how="left", suffixes=("_gel", "_tt"))
+    key_col = "Id registre"  # colonne clé dans les deux CSV
+    df_merged = df_gel.merge(df_tt, on=key_col, how="left", suffixes=("_gel", "_tt"))
 
-    compare_cols = [c for c in df_gel.columns if c != "IdRegistre"]
-    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
+    # Colonnes à comparer
+    compare_cols = [c for c in df_gel.columns if c != key_col]
+    mask = (df_merged[[c + "_gel" for c in compare_cols]] != df_merged[[c + "_tt" for c in compare_cols]]).any(axis=1)
     df_diff = df_merged[mask]
 
-    df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
-    df_modif.columns = ["IdRegistre"] + compare_cols
+    # Construire DataFrame final des modifications
+    df_modif = df_diff[[key_col] + [c + "_gel" for c in compare_cols]]
+    df_modif.columns = [key_col] + compare_cols
     return df_modif
 
 @app.route("/compare", methods=["POST"])
 def compare_endpoint():
     data = request.get_json()
-    gel_file_id = data.get("gel_file_id")
-    tt_file_id = data.get("tt_file_id")
+    gel_url = data.get("gel_csv_url")
+    tt_url = data.get("tt_csv_url")
 
-    if not gel_file_id or not tt_file_id:
-        return jsonify({"error": "Missing gel_file_id or tt_file_id"}), 400
+    if not gel_url or not tt_url:
+        return jsonify({"error": "Missing gel_csv_url or tt_csv_url"}), 400
 
     try:
-        df_gel = download_csv_from_drive(gel_file_id)
-        df_tt = download_csv_from_drive(tt_file_id)
+        gel_path = download_csv(gel_url, "gel.csv")
+        tt_path = download_csv(tt_url, "tt.csv")
+        df_modif = compare_csv(gel_path, tt_path)
 
-        df_modif = compare_csv(df_gel, df_tt)
+        # Retourner les modifications sous forme JSON
         modifications = df_modif.to_dict(orient="records")
-
         return jsonify({
             "status": "ok",
             "message": "Comparaison terminée",
