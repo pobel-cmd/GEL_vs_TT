@@ -5,6 +5,10 @@ import os
 
 app = Flask(__name__)
 
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ API Delta_gel_TT is running!"
+    
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
