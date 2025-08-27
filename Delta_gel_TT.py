@@ -5,10 +5,15 @@ import os
 
 app = Flask(__name__)
 
+# Dossier temporaire
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
+# Colonnes à comparer
+USE_COLS = ["IdRegistre", "Nature", "Nom", "Prenom", "Date_de_naissance", "Alias"]
+
 def download_csv(url, filename):
+    """Télécharge un CSV depuis Google Drive ou autre URL"""
     r = requests.get(url)
     r.raise_for_status()
     path = os.path.join(TMP_DIR, filename)
@@ -17,29 +22,30 @@ def download_csv(url, filename):
     return path
 
 def compare_csv(gel_path, tt_path):
-    df_gel = pd.read_csv(gel_path)
-    df_tt = pd.read_csv(tt_path)
+    """Compare les deux CSV et retourne uniquement les modifications"""
+    df_gel = pd.read_csv(gel_path, usecols=USE_COLS)
+    df_tt = pd.read_csv(tt_path, usecols=USE_COLS)
 
-    # Supprimer Date_Publication
-    if "Date_Publication" in df_gel.columns:
-        df_gel = df_gel.drop(columns=["Date_Publication"])
-    if "Date_Publication" in df_tt.columns:
-        df_tt = df_tt.drop(columns=["Date_Publication"])
-
-    # Fusion sur IdRegistre
+    # Fusionner sur IdRegistre
     df_merged = df_gel.merge(df_tt, on="IdRegistre", how="left", suffixes=("_gel", "_tt"))
-    
-    # Colonnes à comparer
-    compare_cols = [c for c in df_gel.columns if c != "IdRegistre"]
+
+    # Colonnes à comparer (hors IdRegistre)
+    compare_cols = [c for c in USE_COLS if c != "IdRegistre"]
     mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
     df_diff = df_merged[mask]
 
-    # Créer le DataFrame des modifs
+    # Créer DataFrame final pour TimeTonic
     df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
 
     return df_modif
 
+# Health check rapide
+@app.route("/")
+def home():
+    return "Service OK", 200
+
+# Endpoint de comparaison
 @app.route("/compare", methods=["POST"])
 def compare_endpoint():
     data = request.get_json()
