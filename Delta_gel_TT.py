@@ -8,79 +8,65 @@ app = Flask(__name__)
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# URLs des CSV sur GitHub
-GEL_URL = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-GEL.csv"
-TT_URL  = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-TT.csv"
+# URLs brutes des CSV sur GitHub
+URL_GEL = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-GEL.csv"
+URL_TT = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-TT.csv"
 
-def download_csv(url, filename):
-    """Télécharge un CSV depuis GitHub et le sauvegarde temporairement"""
-    try:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-    except Exception as e:
-        raise ValueError(f"Erreur lors du téléchargement de {url}: {e}")
-    
-    path = os.path.join(TMP_DIR, filename)
+def download_csv(url, local_filename):
+    """Télécharge le CSV depuis GitHub"""
+    r = requests.get(url)
+    r.raise_for_status()
+    path = os.path.join(TMP_DIR, local_filename)
     with open(path, "wb") as f:
         f.write(r.content)
     return path
 
-def compare_csv(gel_path, tt_path):
-    """Compare les deux CSV et retourne les modifications"""
-    try:
-        df_gel = pd.read_csv(gel_path)
-        df_tt  = pd.read_csv(tt_path)
-    except Exception as e:
-        raise ValueError(f"Impossible de lire les CSV: {e}")
-
-    # Vérification des colonnes essentielles
-    required_gel = ["Id registre", "Nom", "Prenom", "Date de naissance"]
-    required_tt  = ["RowId", "Id registre", "Nom", "Prenom", "Date de naissance"]
-
-    if not all(c in df_gel.columns for c in required_gel):
-        raise ValueError(f"Colonnes manquantes dans GEL: {required_gel}")
-    if not all(c in df_tt.columns for c in required_tt):
-        raise ValueError(f"Colonnes manquantes dans TT: {required_tt}")
-
-    # Fusion sur Id registre
-    df_merged = df_gel.merge(df_tt, on="Id registre", how="left", suffixes=("_gel", "_tt"))
-
-    # Colonnes à comparer
-    compare_cols = ["Nom", "Prenom", "Date de naissance"]
-    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
-
-    df_diff = df_merged[mask]
-
-    # DataFrame final des modifications
-    df_modif = df_diff[["Id registre"] + [c+"_gel" for c in compare_cols]]
-    df_modif.columns = ["Id registre"] + compare_cols
-
-    return df_modif
+def normalize_columns(df):
+    """Nettoie les noms de colonnes et renomme pour correspondre"""
+    df.columns = [c.strip() for c in df.columns]
+    rename_map = {'ID registre': 'Id registre', 'Date de naissance (texte)': 'Date de naissance'}
+    df.rename(columns=rename_map, inplace=True)
+    return df
 
 @app.route("/", methods=["GET"])
 def home():
     return "✅ API Delta_gel_TT is running!"
 
 @app.route("/compare", methods=["POST"])
-def compare_endpoint():
-    """Compare les CSV et renvoie les modifications en JSON"""
+def compare():
     try:
-        gel_path = download_csv(GEL_URL, "gel.csv")
-        tt_path  = download_csv(TT_URL, "tt.csv")
-        df_modif = compare_csv(gel_path, tt_path)
+        # Téléchargement des CSV
+        path_gel = download_csv(URL_GEL, "test-GEL.csv")
+        path_tt = download_csv(URL_TT, "test-TT.csv")
 
-        modifications = df_modif.to_dict(orient="records")
+        # Lecture avec pandas
+        df_gel = pd.read_csv(path_gel)
+        df_tt = pd.read_csv(path_tt)
 
-        return jsonify({
-            "status": "ok",
-            "message": "Comparaison terminée",
-            "modifications": modifications
-        })
+        # Normalisation des colonnes
+        df_gel = normalize_columns(df_gel)
+        df_tt = normalize_columns(df_tt)
+
+        # Vérification colonnes essentielles
+        required_cols = ['Id registre', 'Nom', 'Prenom', 'Date de naissance']
+        missing_gel = [c for c in required_cols if c not in df_gel.columns]
+        missing_tt = [c for c in required_cols if c not in df_tt.columns]
+
+        if missing_gel:
+            return jsonify({"status":"error", "message": f"Colonnes manquantes dans GEL: {missing_gel}"})
+        if missing_tt:
+            return jsonify({"status":"error", "message": f"Colonnes manquantes dans TT: {missing_tt}"})
+
+        # Comparaison basique : Id registre présent dans GEL mais pas dans TT
+        df_merge = df_gel.merge(df_tt, on='Id registre', how='left', indicator=True)
+        missing_in_tt = df_merge[df_merge['_merge']=='left_only']
+
+        result = missing_in_tt[required_cols].to_dict(orient='records')
+
+        return jsonify({"status":"success", "missing_in_TT": result})
 
     except Exception as e:
-        # Retour JSON en cas d'erreur, pour éviter 500
-        return jsonify({"status": "error", "message": str(e)}), 200
+        return jsonify({"status":"error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
