@@ -26,14 +26,17 @@ def download_csv(url, filename):
     return path
 
 def compare_csv(gel_path, tt_path):
-    """Compare les deux CSV et retourne les différences"""
+    """Compare les deux CSV et retourne les modifications"""
     try:
-        df_gel = pd.read_csv(gel_path)
-        df_tt  = pd.read_csv(tt_path)
+        df_gel = pd.read_csv(gel_path, dtype=str).fillna("")
+        df_tt  = pd.read_csv(tt_path, dtype=str).fillna("")
     except Exception as e:
         raise ValueError(f"Impossible de lire les CSV: {e}")
 
-    # Vérification des colonnes essentielles
+    # Normalisation : enlever espaces autour des textes
+    df_gel = df_gel.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    df_tt  = df_tt.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+
     required_gel = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
     required_tt  = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
 
@@ -42,20 +45,15 @@ def compare_csv(gel_path, tt_path):
     if not all(c in df_tt.columns for c in required_tt):
         raise ValueError(f"Colonnes manquantes dans TT: {required_tt}")
 
-    # Fusion sur IdRegistre
-    df_merged = df_gel.merge(df_tt, on="IdRegistre", how="left", suffixes=("_gel", "_tt"))
+    # Fusion stricte sur IdRegistre
+    df_merged = df_gel.merge(df_tt, on="IdRegistre", how="outer", suffixes=("_gel", "_tt"))
 
-    # Colonnes à comparer
     compare_cols = ["Nom", "Prenom", "Date_de_naissance"]
-
-    mask = False
-    for col in compare_cols:
-        mask = mask | (df_merged[f"{col}_gel"] != df_merged[f"{col}_tt"])
+    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
 
     df_diff = df_merged[mask]
 
-    # DataFrame final des modifications (côté GEL)
-    df_modif = df_diff[["IdRegistre"] + [f"{c}_gel" for c in compare_cols]]
+    df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
 
     return df_modif
