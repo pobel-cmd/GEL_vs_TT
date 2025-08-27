@@ -8,19 +8,15 @@ app = Flask(__name__)
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# URLs des CSV sur GitHub
 GEL_URL = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-GEL.csv"
 TT_URL  = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-TT.csv"
 
 def download_csv(url, filename):
     path = os.path.join(TMP_DIR, filename)
-    try:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        with open(path, "wb") as f:
-            f.write(r.content)
-    except Exception as e:
-        raise ValueError(f"Erreur lors du téléchargement de {url}: {e}")
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    with open(path, "wb") as f:
+        f.write(r.content)
     return path
 
 def compare_csv(gel_path, tt_path):
@@ -28,14 +24,13 @@ def compare_csv(gel_path, tt_path):
     df_tt  = pd.read_csv(tt_path)
 
     required_cols = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
-
     for col in required_cols:
         if col not in df_gel.columns:
             raise ValueError(f"Colonne manquante dans GEL: {col}")
         if col not in df_tt.columns:
             raise ValueError(f"Colonne manquante dans TT: {col}")
 
-    # Remplacer NaN par une valeur vide pour comparaison
+    # Remplacer NaN par vide pour comparaison
     df_gel_filled = df_gel.fillna("")
     df_tt_filled  = df_tt.fillna("")
 
@@ -44,14 +39,16 @@ def compare_csv(gel_path, tt_path):
 
     compare_cols = ["Nom", "Prenom", "Date_de_naissance"]
     
-    # Créer un masque pour détecter les différences
-    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
+    # Créer un masque pour chaque colonne
+    mask = pd.Series(False, index=df_merged.index)
+    for col in compare_cols:
+        mask |= df_merged[f"{col}_gel"] != df_merged[f"{col}_tt"]
 
-    # Filtrer uniquement les lignes où il y a au moins une différence
+    # Filtrer uniquement les lignes avec au moins une différence
     df_diff = df_merged[mask]
 
     # Préparer le JSON final
-    df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
+    df_modif = df_diff[["IdRegistre"] + [f"{c}_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
 
     return df_modif
@@ -66,9 +63,7 @@ def compare_endpoint():
         gel_path = download_csv(GEL_URL, "gel.csv")
         tt_path  = download_csv(TT_URL, "tt.csv")
         df_modif = compare_csv(gel_path, tt_path)
-
-        modifications = df_modif.to_dict(orient="records")
-        return jsonify({"status": "ok", "message": "Comparaison terminée", "modifications": modifications})
+        return jsonify({"status": "ok", "message": "Comparaison terminée", "modifications": df_modif.to_dict(orient="records")})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 200
 
