@@ -25,55 +25,52 @@ def download_csv(url, filename):
         f.write(r.content)
     return path
 
-def normalize_text(s):
-    """Nettoie les chaînes : supprime espaces début/fin, met en minuscules, remplace NaN par ''"""
+def clean_string(s):
     if pd.isna(s):
-        return ""
-    return str(s).strip().lower()
-
-def normalize_date(s):
-    """Essaye de parser la date et renvoie sous format YYYY-MM-DD, sinon vide"""
-    try:
-        return pd.to_datetime(s, dayfirst=True, errors='coerce').strftime("%Y-%m-%d")
-    except:
-        return ""
+        return None
+    return str(s).strip()
 
 def compare_csv(gel_path, tt_path):
     """Compare les deux CSV et retourne les modifications"""
     try:
-        df_gel = pd.read_csv(gel_path)
-        df_tt  = pd.read_csv(tt_path)
+        df_gel = pd.read_csv(gel_path, dtype=str)
+        df_tt  = pd.read_csv(tt_path, dtype=str)
     except Exception as e:
         raise ValueError(f"Impossible de lire les CSV: {e}")
 
-    # Colonnes essentielles
+    # Colonnes à vérifier
     required_gel = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
     required_tt  = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
 
-    if not all(c in df_gel.columns for c in required_gel):
-        raise ValueError(f"Colonnes manquantes dans GEL: {required_gel}")
-    if not all(c in df_tt.columns for c in required_tt):
-        raise ValueError(f"Colonnes manquantes dans TT: {required_tt}")
+    for c in required_gel:
+        if c not in df_gel.columns:
+            raise ValueError(f"Colonne manquante dans GEL: {c}")
+    for c in required_tt:
+        if c not in df_tt.columns:
+            raise ValueError(f"Colonne manquante dans TT: {c}")
 
-    # Normalisation
-    for c in ["Nom", "Prenom"]:
-        df_gel[c] = df_gel[c].apply(normalize_text)
-        df_tt[c]  = df_tt[c].apply(normalize_text)
-    df_gel["Date_de_naissance"] = df_gel["Date_de_naissance"].apply(normalize_date)
-    df_tt["Date_de_naissance"]  = df_tt["Date_de_naissance"].apply(normalize_date)
+    # Nettoyage des chaînes
+    for c in ["Nom", "Prenom", "Date_de_naissance"]:
+        df_gel[c] = df_gel[c].apply(clean_string)
+        df_tt[c]  = df_tt[c].apply(clean_string)
 
     # Fusion sur IdRegistre
     df_merged = df_gel.merge(df_tt, on="IdRegistre", how="left", suffixes=("_gel", "_tt"))
 
-    # Colonnes à comparer
     compare_cols = ["Nom", "Prenom", "Date_de_naissance"]
-    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
+
+    # Comparaison ligne par ligne avec to_numpy pour éviter l'erreur d'index
+    mask = (df_merged[[c+"_gel" for c in compare_cols]].to_numpy() !=
+            df_merged[[c+"_tt" for c in compare_cols]].to_numpy()).any(axis=1)
 
     df_diff = df_merged[mask]
 
-    # DataFrame final des modifications
+    # DataFrame final à renvoyer
     df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
+
+    # Conversion NaN → None pour JSON
+    df_modif = df_modif.where(pd.notna(df_modif), None)
 
     return df_modif
 
@@ -98,7 +95,6 @@ def compare_endpoint():
         })
 
     except Exception as e:
-        # Retour JSON en cas d'erreur
         return jsonify({"status": "error", "message": str(e)}), 200
 
 if __name__ == "__main__":
