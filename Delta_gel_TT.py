@@ -26,7 +26,7 @@ def download_csv(url, filename):
     return path
 
 def compare_csv(gel_path, tt_path):
-    """Compare les deux CSV et retourne les modifications"""
+    """Compare les deux CSV et retourne les différences"""
     try:
         df_gel = pd.read_csv(gel_path)
         df_tt  = pd.read_csv(tt_path)
@@ -54,7 +54,7 @@ def compare_csv(gel_path, tt_path):
 
     df_diff = df_merged[mask]
 
-    # DataFrame final des modifications
+    # DataFrame final des modifications (côté GEL)
     df_modif = df_diff[["IdRegistre"] + [f"{c}_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
 
