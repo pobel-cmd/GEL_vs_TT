@@ -1,46 +1,89 @@
 from flask import Flask, request, jsonify
 import pandas as pd
-from io import StringIO
+import requests
+import os
 
 app = Flask(__name__)
 
-@app.route("/", methods=["POST"])
-def compare_csv():
+# Dossier temporaire pour stocker les CSV
+TMP_DIR = "/tmp"
+os.makedirs(TMP_DIR, exist_ok=True)
+
+# URLs des CSV sur GitHub
+GEL_URL = "https://raw.githubusercontent.com/pobel-cmd/GEL_vs_TT/main/test-GEL.csv"
+TT_URL  = "https://raw.githubusercontent.com/pobel-cmd/GEL_vs_TT/main/test-TT.csv"
+
+def download_csv(url, filename):
+    """Télécharge un CSV depuis GitHub et le sauvegarde temporairement"""
     try:
-        data = request.json
-        if not data or "csv1" not in data or "csv2" not in data:
-            return jsonify({"error": "Les deux fichiers CSV (csv1 et csv2) sont requis."}), 400
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        raise ValueError(f"Erreur lors du téléchargement de {url}: {e}")
+    
+    path = os.path.join(TMP_DIR, filename)
+    with open(path, "wb") as f:
+        f.write(r.content)
+    return path
 
-        # Charger les CSV depuis les chaînes envoyées par Make
-        csv1 = pd.read_csv(StringIO(data["csv1"]))
-        csv2 = pd.read_csv(StringIO(data["csv2"]))
+def compare_csv(gel_path, tt_path):
+    """Compare les deux CSV et retourne les modifications"""
+    try:
+        df_gel = pd.read_csv(gel_path, dtype=str)
+        df_tt  = pd.read_csv(tt_path, dtype=str)
+    except Exception as e:
+        raise ValueError(f"Impossible de lire les CSV: {e}")
 
-        # Trier et réindexer pour être sûr que la comparaison marche
-        if "IdRegistre" in csv1.columns and "IdRegistre" in csv2.columns:
-            csv1 = csv1.sort_values(by="IdRegistre").reset_index(drop=True)
-            csv2 = csv2.sort_values(by="IdRegistre").reset_index(drop=True)
+    # Colonnes essentielles
+    required_cols = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
+    for c in required_cols:
+        if c not in df_gel.columns:
+            raise ValueError(f"Colonne manquante dans GEL: {c}")
+        if c not in df_tt.columns:
+            raise ValueError(f"Colonne manquante dans TT: {c}")
 
-        # Aligner colonnes
-        csv1, csv2 = csv1.align(csv2, join="outer", axis=1)
+    # Remplacer NaN par ''
+    df_gel.fillna("", inplace=True)
+    df_tt.fillna("", inplace=True)
 
-        # Comparer
-        diff = csv1.compare(csv2, keep_shape=False, keep_equal=False)
+    # Fusion sur IdRegistre
+    df_merged = df_gel.merge(df_tt, on="IdRegistre", how="left", suffixes=("_gel", "_tt"))
 
-        modifications = []
-        for idx in diff.index:
-            row = csv2.loc[idx]
-            modifications.append(row.to_dict())
+    # Colonnes à comparer
+    compare_cols = ["Nom", "Prenom", "Date_de_naissance"]
+    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
+
+    df_diff = df_merged[mask]
+
+    # DataFrame final des modifications
+    df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
+    df_modif.columns = ["IdRegistre"] + compare_cols
+
+    return df_modif
+
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ API Delta_gel_TT is running!"
+
+@app.route("/compare", methods=["POST"])
+def compare_endpoint():
+    """Compare les CSV et renvoie les modifications en JSON"""
+    try:
+        gel_path = download_csv(GEL_URL, "gel.csv")
+        tt_path  = download_csv(TT_URL, "tt.csv")
+        df_modif = compare_csv(gel_path, tt_path)
+
+        # Remplacer les chaînes vides par null pour JSON
+        modifications = df_modif.replace({"": None}).to_dict(orient="records")
 
         return jsonify({
+            "status": "ok",
             "message": "Comparaison terminée",
-            "nb_modifications": len(modifications),
             "modifications": modifications
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 200
 
-
-if __name__ == "__main__":
-    # Local uniquement — en prod Render utilisera gunicorn
-    app.run(host="0.0.0.0", port=10000, debug=True)
+# PAS D'APP.RUN ici pour Render
+# Render utilisera: gunicorn Delta_gel_TT:app
