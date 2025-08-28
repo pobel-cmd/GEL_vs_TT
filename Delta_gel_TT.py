@@ -9,7 +9,6 @@ app = Flask(__name__)
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# Defaults (surchageables via JSON POST)
 GEL_URL_DEFAULT = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange/refs/heads/main/test-GEL.csv"
 TT_URL_DEFAULT  = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange/refs/heads/main/test-TT.csv"
 
@@ -58,7 +57,7 @@ def normalize_value(col, val):
 
 
 # ---------- Core diff ----------
-def compute_delta(df_gel, df_tt):
+def compute_delta(df_gel, df_tt, updates_as_rows: bool):
     # Vérifier colonnes
     for c in [ID_COL] + COMPARE_COLS:
         if c not in df_gel.columns:
@@ -89,7 +88,7 @@ def compute_delta(df_gel, df_tt):
     to_delete_ids = sorted(list(ids_tt - ids_gel))
     intersect_ids = sorted(list(ids_gel & ids_tt))
 
-    # Ajouts
+    # Ajouts (lignes GEL complètes)
     to_create = []
     for rid in to_create_ids:
         rec = df_gel.loc[rid]
@@ -98,14 +97,16 @@ def compute_delta(df_gel, df_tt):
             out[c] = as_str(rec[c])
         to_create.append(out)
 
-    # Suppressions
+    # Suppressions (ID seul)
     to_delete = [{"IdRegistre": rid} for rid in to_delete_ids]
 
     # Updates
-    to_update = []
+    to_update_changes = []  # ancien format (avec old/new) — on pourra le supprimer si updates_as_rows=True
+    to_update_rows    = []  # nouveau format demandé : ligne complète (valeurs GEL)
     for rid in intersect_ids:
         gel_row = df_gel.loc[rid]
         tt_row  = df_tt.loc[rid]
+        changed = False
         changes = []
         for c in COMPARE_COLS:
             gel_raw = as_str(gel_row[c])
@@ -113,20 +114,36 @@ def compute_delta(df_gel, df_tt):
             gel_norm = normalize_value(c, gel_raw)
             tt_norm  = normalize_value(c, tt_raw)
             if gel_norm != tt_norm:
+                changed = True
                 changes.append({"field": c, "old": tt_raw, "new": gel_raw})
-        if changes:
-            to_update.append({"IdRegistre": rid, "changes": changes})
+        if changed:
+            # version “rows” (valeurs GEL complètes)
+            row_out = {"IdRegistre": rid}
+            for c in COMPARE_COLS:
+                row_out[c] = as_str(gel_row[c])
+            to_update_rows.append(row_out)
 
-    return {
+            # version “changes” (conservée si besoin)
+            to_update_changes.append({"IdRegistre": rid, "changes": changes})
+
+    payload = {
         "counts": {
             "create": len(to_create),
-            "update": len(to_update),
+            "update": len(to_update_rows),
             "delete": len(to_delete),
         },
         "to_create": to_create,
-        "to_update": to_update,
         "to_delete": to_delete,
     }
+
+    # Selon le mode demandé :
+    if updates_as_rows:
+        payload["to_update"] = to_update_rows           # uniquement lignes complètes
+    else:
+        payload["to_update"] = to_update_changes        # ancien format
+        payload["to_update_rows"] = to_update_rows      # + nouveau format en parallèle
+
+    return payload
 
 
 # ---------- Flask endpoints ----------
@@ -142,7 +159,8 @@ def compare_endpoint():
       "gel_url": "...",
       "tt_url":  "...",
       "id_col": "IdRegistre",
-      "compare_cols": ["Nom","Prenom","Date_de_naissance"]
+      "compare_cols": ["Nom","Prenom","Date_de_naissance"],
+      "update_payload": "rows" | "changes"   # défaut: "changes" + "to_update_rows"
     }
     """
     try:
@@ -156,19 +174,19 @@ def compare_endpoint():
         if body.get("compare_cols"):
             COMPARE_COLS = body["compare_cols"]
 
+        updates_as_rows = (body.get("update_payload") == "rows")
+
         gel_path = download_csv(gel_url, "gel.csv")
         tt_path  = download_csv(tt_url,  "tt.csv")
 
-        # ⚠️ LIGNE QUI POSAIT PROBLÈME (corrigée, parenthèses fermées)
         df_gel = pd.read_csv(gel_path, dtype=str, keep_default_na=False, na_values=[""])
         df_tt  = pd.read_csv(tt_path,  dtype=str, keep_default_na=False, na_values=[""])
 
-        delta = compute_delta(df_gel, df_tt)
+        delta = compute_delta(df_gel, df_tt, updates_as_rows)
 
         return jsonify({"status": "ok", "message": "Comparaison terminée", **delta})
 
     except Exception as e:
-        # Garder 200 si Make préfère, mais inclure status:error pour le router
         return jsonify({"status": "error", "message": str(e)}), 200
 
 
