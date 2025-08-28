@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 import pandas as pd
-import requests
 import os
 
 app = Flask(__name__)
@@ -8,69 +7,53 @@ app = Flask(__name__)
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# URLs des CSV sur GitHub
+# URLs des CSV sur GitHub par défaut
 GEL_URL = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-GEL.csv"
 TT_URL  = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-TT.csv"
 
-def download_csv(url, filename):
-    """Télécharge un CSV depuis GitHub et le sauvegarde temporairement"""
-    try:
+# Noms des fichiers temporaires
+GEL_FILE = os.path.join(TMP_DIR, "gel.csv")
+TT_FILE  = os.path.join(TMP_DIR, "tt.csv")
+
+def download_csv(url, path):
+    """Télécharge un CSV depuis GitHub si le fichier n'existe pas déjà"""
+    import requests
+    if not os.path.exists(path):
         r = requests.get(url, timeout=20)
         r.raise_for_status()
-    except Exception as e:
-        raise ValueError(f"Erreur lors du téléchargement de {url}: {e}")
-    
-    path = os.path.join(TMP_DIR, filename)
-    with open(path, "wb") as f:
-        f.write(r.content)
-    return path
-
-def clean_string(s):
-    if pd.isna(s):
-        return None
-    return str(s).strip()
+        with open(path, "wb") as f:
+            f.write(r.content)
 
 def compare_csv(gel_path, tt_path):
     """Compare les deux CSV et retourne les modifications"""
-    try:
-        df_gel = pd.read_csv(gel_path, dtype=str)
-        df_tt  = pd.read_csv(tt_path, dtype=str)
-    except Exception as e:
-        raise ValueError(f"Impossible de lire les CSV: {e}")
+    df_gel = pd.read_csv(gel_path, dtype=str).fillna("")
+    df_tt  = pd.read_csv(tt_path, dtype=str).fillna("")
 
     # Colonnes à vérifier
     required_gel = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
     required_tt  = ["IdRegistre", "Nom", "Prenom", "Date_de_naissance"]
 
-    for c in required_gel:
-        if c not in df_gel.columns:
-            raise ValueError(f"Colonne manquante dans GEL: {c}")
-    for c in required_tt:
-        if c not in df_tt.columns:
-            raise ValueError(f"Colonne manquante dans TT: {c}")
+    if not all(c in df_gel.columns for c in required_gel):
+        raise ValueError(f"Colonnes manquantes dans GEL: {required_gel}")
+    if not all(c in df_tt.columns for c in required_tt):
+        raise ValueError(f"Colonnes manquantes dans TT: {required_tt}")
 
-    # Nettoyage des chaînes
-    for c in ["Nom", "Prenom", "Date_de_naissance"]:
-        df_gel[c] = df_gel[c].apply(clean_string)
-        df_tt[c]  = df_tt[c].apply(clean_string)
+    # Tri pour garantir alignement des index
+    df_gel = df_gel.sort_values("IdRegistre").reset_index(drop=True)
+    df_tt  = df_tt.sort_values("IdRegistre").reset_index(drop=True)
 
     # Fusion sur IdRegistre
-    df_merged = df_gel.merge(df_tt, on="IdRegistre", how="left", suffixes=("_gel", "_tt"))
+    df_merged = pd.merge(df_gel, df_tt, on="IdRegistre", how="outer", suffixes=("_gel", "_tt"))
 
+    # Colonnes à comparer
     compare_cols = ["Nom", "Prenom", "Date_de_naissance"]
-
-    # Comparaison ligne par ligne avec to_numpy pour éviter l'erreur d'index
-    mask = (df_merged[[c+"_gel" for c in compare_cols]].to_numpy() !=
-            df_merged[[c+"_tt" for c in compare_cols]].to_numpy()).any(axis=1)
+    mask = (df_merged[[c+"_gel" for c in compare_cols]] != df_merged[[c+"_tt" for c in compare_cols]]).any(axis=1)
 
     df_diff = df_merged[mask]
 
-    # DataFrame final à renvoyer
+    # DataFrame final
     df_modif = df_diff[["IdRegistre"] + [c+"_gel" for c in compare_cols]]
     df_modif.columns = ["IdRegistre"] + compare_cols
-
-    # Conversion NaN → None pour JSON
-    df_modif = df_modif.where(pd.notna(df_modif), None)
 
     return df_modif
 
@@ -78,14 +61,27 @@ def compare_csv(gel_path, tt_path):
 def home():
     return "✅ API Delta_gel_TT is running!"
 
+@app.route("/upload_csv", methods=["POST"])
+def upload_csv():
+    """Recevoir des fichiers CSV GEL et TT depuis Make"""
+    try:
+        if "gel" in request.files:
+            request.files["gel"].save(GEL_FILE)
+        if "tt" in request.files:
+            request.files["tt"].save(TT_FILE)
+        return jsonify({"status": "ok", "message": "Fichiers reçus"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 200
+
 @app.route("/compare", methods=["POST"])
 def compare_endpoint():
-    """Compare les CSV et renvoie les modifications en JSON"""
+    """Compare les CSV et renvoie les modifications"""
     try:
-        gel_path = download_csv(GEL_URL, "gel.csv")
-        tt_path  = download_csv(TT_URL, "tt.csv")
-        df_modif = compare_csv(gel_path, tt_path)
+        # Si Make a uploadé les fichiers, on les prend, sinon on télécharge depuis GitHub
+        download_csv(GEL_URL, GEL_FILE)
+        download_csv(TT_URL, TT_FILE)
 
+        df_modif = compare_csv(GEL_FILE, TT_FILE)
         modifications = df_modif.to_dict(orient="records")
 
         return jsonify({
@@ -99,4 +95,4 @@ def compare_endpoint():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.
