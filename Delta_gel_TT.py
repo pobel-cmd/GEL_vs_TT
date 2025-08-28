@@ -9,14 +9,17 @@ app = Flask(__name__)
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
+# URLs par défaut (surchageables via JSON POST)
 GEL_URL_DEFAULT = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange/refs/heads/main/test-GEL.csv"
 TT_URL_DEFAULT  = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange/refs/heads/main/test-TT.csv"
 
+# Schéma minimal
 ID_COL = "IdRegistre"
 COMPARE_COLS = ["Nom", "Prenom", "Date_de_naissance"]
+TT_IDCOLS = ["rowId"]  # colonnes techniques TT
 
 
-# ---------- Utils ----------
+# ---------------- Utils ----------------
 def download_csv(url, filename):
     try:
         r = requests.get(url, timeout=20)
@@ -56,20 +59,21 @@ def normalize_value(col, val):
     return normalize_generic(as_str(val))
 
 
-# ---------- Core diff ----------
-def compute_delta(df_gel, df_tt, updates_as_rows: bool):
-    # Vérifier colonnes
+# ---------------- Core diff ----------------
+def compute_delta(df_gel, df_tt):
+    # vérif colonnes
     for c in [ID_COL] + COMPARE_COLS:
         if c not in df_gel.columns:
             raise ValueError(f"Colonne manquante dans GEL: {c}")
         if c not in df_tt.columns:
             raise ValueError(f"Colonne manquante dans TT: {c}")
 
-    # Colonnes utiles et types
+    # colonnes utiles (on garde rowId si présent dans TT)
+    tt_cols = [ID_COL] + COMPARE_COLS + [c for c in TT_IDCOLS if c in df_tt.columns]
     df_gel = df_gel[[ID_COL] + COMPARE_COLS].copy().astype("string")
-    df_tt  = df_tt[[ID_COL] + COMPARE_COLS].copy().astype("string")
+    df_tt  = df_tt[tt_cols].copy().astype("string")
 
-    # Index par ID
+    # index par ID
     df_gel = (
         df_gel.dropna(subset=[ID_COL])
               .drop_duplicates(subset=[ID_COL], keep="last")
@@ -88,65 +92,59 @@ def compute_delta(df_gel, df_tt, updates_as_rows: bool):
     to_delete_ids = sorted(list(ids_tt - ids_gel))
     intersect_ids = sorted(list(ids_gel & ids_tt))
 
-    # Ajouts (lignes GEL complètes)
-    to_create = []
+    # ---------- CREATE ----------
+    to_createArray = []
     for rid in to_create_ids:
-        rec = df_gel.loc[rid]
+        gel_row = df_gel.loc[rid]
         out = {"IdRegistre": rid}
         for c in COMPARE_COLS:
-            out[c] = as_str(rec[c])
-        to_create.append(out)
+            out[c] = as_str(gel_row[c])
+        to_createArray.append(out)
 
-    # Suppressions (ID seul)
-    to_delete = [{"IdRegistre": rid} for rid in to_delete_ids]
+    # ---------- DELETE ----------
+    to_deleteArray = []
+    for rid in to_delete_ids:
+        if rid in df_tt.index and "rowId" in df_tt.columns:
+            tt_row = df_tt.loc[rid]
+            tt_rowid = as_str(tt_row.get("rowId"))
+            if tt_rowid:
+                to_deleteArray.append({"rowId": tt_rowid})
+                continue
+        to_deleteArray.append({"IdRegistre": rid})
 
-    # Updates
-    to_update_changes = []  # ancien format (avec old/new) — on pourra le supprimer si updates_as_rows=True
-    to_update_rows    = []  # nouveau format demandé : ligne complète (valeurs GEL)
+    # ---------- UPDATE ----------
+    to_update_rowsArray = []
     for rid in intersect_ids:
         gel_row = df_gel.loc[rid]
         tt_row  = df_tt.loc[rid]
         changed = False
-        changes = []
         for c in COMPARE_COLS:
             gel_raw = as_str(gel_row[c])
             tt_raw  = as_str(tt_row[c])
-            gel_norm = normalize_value(c, gel_raw)
-            tt_norm  = normalize_value(c, tt_raw)
-            if gel_norm != tt_norm:
+            if normalize_value(c, gel_raw) != normalize_value(c, tt_raw):
                 changed = True
-                changes.append({"field": c, "old": tt_raw, "new": gel_raw})
         if changed:
-            # version “rows” (valeurs GEL complètes)
-            row_out = {"IdRegistre": rid}
+            row_payload = {"IdRegistre": rid}
             for c in COMPARE_COLS:
-                row_out[c] = as_str(gel_row[c])
-            to_update_rows.append(row_out)
-
-            # version “changes” (conservée si besoin)
-            to_update_changes.append({"IdRegistre": rid, "changes": changes})
+                row_payload[c] = as_str(gel_row[c])
+            if "rowId" in tt_row.index and as_str(tt_row["rowId"]):
+                row_payload["rowId"] = as_str(tt_row["rowId"])
+            to_update_rowsArray.append(row_payload)
 
     payload = {
         "counts": {
-            "create": len(to_create),
-            "update": len(to_update_rows),
-            "delete": len(to_delete),
+            "create": len(to_createArray),
+            "update": len(to_update_rowsArray),
+            "delete": len(to_deleteArray),
         },
-        "to_create": to_create,
-        "to_delete": to_delete,
+        "to_createArray": to_createArray,
+        "to_update_rowsArray": to_update_rowsArray,
+        "to_deleteArray": to_deleteArray
     }
-
-    # Selon le mode demandé :
-    if updates_as_rows:
-        payload["to_update"] = to_update_rows           # uniquement lignes complètes
-    else:
-        payload["to_update"] = to_update_changes        # ancien format
-        payload["to_update_rows"] = to_update_rows      # + nouveau format en parallèle
-
     return payload
 
 
-# ---------- Flask endpoints ----------
+# ---------------- Flask endpoints ----------------
 @app.route("/", methods=["GET"])
 def home():
     return "✅ API Delta_gel_TT is running!"
@@ -159,8 +157,7 @@ def compare_endpoint():
       "gel_url": "...",
       "tt_url":  "...",
       "id_col": "IdRegistre",
-      "compare_cols": ["Nom","Prenom","Date_de_naissance"],
-      "update_payload": "rows" | "changes"   # défaut: "changes" + "to_update_rows"
+      "compare_cols": ["Nom","Prenom","Date_de_naissance"]
     }
     """
     try:
@@ -174,17 +171,19 @@ def compare_endpoint():
         if body.get("compare_cols"):
             COMPARE_COLS = body["compare_cols"]
 
-        updates_as_rows = (body.get("update_payload") == "rows")
-
         gel_path = download_csv(gel_url, "gel.csv")
         tt_path  = download_csv(tt_url,  "tt.csv")
 
         df_gel = pd.read_csv(gel_path, dtype=str, keep_default_na=False, na_values=[""])
         df_tt  = pd.read_csv(tt_path,  dtype=str, keep_default_na=False, na_values=[""])
 
-        delta = compute_delta(df_gel, df_tt, updates_as_rows)
+        delta = compute_delta(df_gel, df_tt)
 
-        return jsonify({"status": "ok", "message": "Comparaison terminée", **delta})
+        return jsonify({
+            "status": "ok",
+            "message": "Comparaison terminée",
+            **delta
+        })
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 200
