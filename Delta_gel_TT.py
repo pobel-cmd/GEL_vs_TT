@@ -9,8 +9,8 @@ TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
 # URLs des CSV sur GitHub
-GEL_URL = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-GEL.csv"
-TT_URL  = "https://raw.githubusercontent.com/pobel-cmd/csv-storage/refs/heads/main/test-TT.csv"
+GEL_URL = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange/refs/heads/main/test-GEL.csv"
+TT_URL  = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange/refs/heads/main/test-TT.csv"
 
 def download_csv(url, filename):
     """Télécharge un CSV depuis GitHub et le sauvegarde temporairement"""
