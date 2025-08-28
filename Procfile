@@ -1,1 +1,1 @@
-web: gunicorn Delta_gel_TT:app --timeout 600 --workers 1 --threads 4 --bind 0.0.0.0:$PORT
+web: gunicorn Delta_gel_TT:app
