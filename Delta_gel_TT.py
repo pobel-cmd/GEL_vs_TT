@@ -42,5 +42,5 @@ def compare_csv():
 
 
 if __name__ == "__main__":
-    # Pour tester en local, Render utilisera gunicorn (ignore ce bloc en prod)
+    # Local uniquement — en prod Render utilisera gunicorn
     app.run(host="0.0.0.0", port=10000, debug=True)
