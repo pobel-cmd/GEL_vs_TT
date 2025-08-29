@@ -18,11 +18,8 @@ ID_COL = "IdRegistre"
 COMPARE_COLS = ["Nom", "Prenom", "Date_de_naissance", "Alias", "Nature"]
 TT_IDCOLS = ["RowID"]  # colonne technique TimeTonic
 
-# VIDAGE EN DUR : tous les champs vides partent en ""
-EMPTY_MODE = "empty_string"
-
-INVALID_STRINGS = {"", "undefined", "null", "none", "nan"}  # insensible à la casse
-
+# Tokens traités comme "vides" en entrée (insensibles à la casse)
+INVALID_STRINGS = {"", "undefined", "null", "none", "nan"}
 
 # ---------------- Utils ----------------
 def download_csv(url, filename):
@@ -45,6 +42,10 @@ def strip_compact(s):
     s = " ".join(s.split())
     return s.strip()
 
+def raw_stripped(val):
+    """Chaîne brute trim; None si NaN."""
+    return strip_compact(as_str(val))
+
 def remove_accents(s):
     if s is None:
         return None
@@ -62,15 +63,12 @@ def normalize_generic(s):
 
 def clean_field(val):
     """Retourne None si vide/'undefined'/'null'/... sinon valeur trim."""
-    s = as_str(val)
+    s = raw_stripped(val)
     if s is None:
         return None
-    s2 = strip_compact(s)
-    if s2 is None:
+    if s.lower() in INVALID_STRINGS:
         return None
-    if s2.lower() in INVALID_STRINGS:
-        return None
-    return s2
+    return s
 
 def clean_id(val):
     """IdRegistre valide: non vide, ≠ '0', ≠ undefined/null."""
@@ -86,7 +84,7 @@ def normalize_value(col, val):
     return normalize_generic(clean_field(val))
 
 def apply_empty_mode(row_dict):
-    """Convertit None -> "" pour tous les champs (sauf RowID)"""
+    """Convertit None -> "" pour tous les champs (sauf RowID)."""
     out = {}
     for k, v in row_dict.items():
         if k == "RowID":
@@ -94,6 +92,13 @@ def apply_empty_mode(row_dict):
         else:
             out[k] = "" if v is None else v
     return out
+
+def is_invalid_token_nonempty(raw):
+    """True si la chaîne brute est 'undefined'/'null'/'none'/'nan' (≠ '')."""
+    if raw is None:
+        return False
+    r = raw.lower()
+    return r in INVALID_STRINGS and r != ""
 
 
 # ---------------- Core diff ----------------
@@ -156,7 +161,7 @@ def compute_delta(df_gel, df_tt):
             to_deleteArray.append({"IdRegistre": rid})
 
     # ---------- UPDATE (TT = miroir exact de GEL ; vides -> "") ----------
-    # Si différent sur ≥1 champ, on envoie les valeurs GEL telles quelles (y compris vides)
+    # On force update si TT contient un token 'undefined'/'null'/... et que GEL est vide.
     to_update_rowsArray = []
     for rid in intersect_ids:
         gel_row = df_gel.loc[rid]
@@ -166,14 +171,25 @@ def compute_delta(df_gel, df_tt):
         row_payload = {"IdRegistre": rid}
 
         for c in COMPARE_COLS:
-            gel_v = gel_row.get(c, None)  # peut être None => doit effacer TT
-            tt_v  = tt_row.get(c, None)
+            # valeurs brutes (avant nettoyage) pour détecter les tokens 'undefined'
+            gel_raw = raw_stripped(gel_row.get(c, None))
+            tt_raw  = raw_stripped(tt_row.get(c, None))
 
-            if normalize_value(c, gel_v) != normalize_value(c, tt_v):
+            # valeurs nettoyées (None si vide/undefined/null/...)
+            gel_v_clean = clean_field(gel_raw)
+            tt_v_clean  = clean_field(tt_raw)
+
+            # 1) Cas spécial: TT a un token 'undefined' (ou null/none/nan) NON vide et GEL est vide -> forcer update
+            if is_invalid_token_nonempty(tt_raw) and (gel_raw is None or gel_raw == ""):
+                changed = True
+            # 2) Sinon: comparer normalement
+            elif normalize_value(c, gel_v_clean) != normalize_value(c, tt_v_clean):
                 changed = True
 
-            row_payload[c] = gel_v  # on reflète exactement GEL
+            # Miroir exact GEL : on met la valeur GEL (nettoyée), sera convertie en "" si None
+            row_payload[c] = gel_v_clean
 
+        # RowID si dispo côté TT
         if "RowID" in df_tt.columns:
             rowid = as_str(tt_row.get("RowID"))
             if rowid:
@@ -207,7 +223,7 @@ def compare_endpoint():
     {
       "gel_url": "...",
       "tt_url":  "..."
-      // Vidage en dur: tous les champs vides partent en "" (EMPTY_MODE = "empty_string")
+      // Vides envoyés en "" par défaut (jamais 'undefined')
     }
     """
     try:
