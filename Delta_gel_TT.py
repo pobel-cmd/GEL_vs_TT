@@ -9,14 +9,17 @@ app = Flask(__name__)
 TMP_DIR = "/tmp"
 os.makedirs(TMP_DIR, exist_ok=True)
 
-# URLs par défaut (surchageables via JSON POST)
+# URLs par défaut (surchageables via JSON POST si tu veux)
 GEL_URL_DEFAULT = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange/refs/heads/main/test-GEL.csv"
 TT_URL_DEFAULT  = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange/refs/heads/main/test-TT.csv"
 
 # Schéma
 ID_COL = "IdRegistre"
 COMPARE_COLS = ["Nom", "Prenom", "Date_de_naissance", "Alias", "Nature"]
-TT_IDCOLS = ["RowID"]  # TimeTonic
+TT_IDCOLS = ["RowID"]  # colonne technique TimeTonic
+
+# VIDAGE EN DUR : tous les champs vides partent en ""
+EMPTY_MODE = "empty_string"
 
 INVALID_STRINGS = {"", "undefined", "null", "none", "nan"}  # insensible à la casse
 
@@ -82,10 +85,8 @@ def normalize_value(col, val):
     """Pour comparer (accents/casse/espaces)."""
     return normalize_generic(clean_field(val))
 
-def apply_empty_mode(row_dict, empty_mode):
-    """Convertit None -> "" si empty_mode == 'empty_string' (sauf RowID)."""
-    if empty_mode != "empty_string":
-        return row_dict
+def apply_empty_mode(row_dict):
+    """Convertit None -> "" pour tous les champs (sauf RowID)"""
     out = {}
     for k, v in row_dict.items():
         if k == "RowID":
@@ -96,7 +97,7 @@ def apply_empty_mode(row_dict, empty_mode):
 
 
 # ---------------- Core diff ----------------
-def compute_delta(df_gel, df_tt, empty_mode="null"):
+def compute_delta(df_gel, df_tt):
     # Vérif colonnes minimales
     for c in [ID_COL] + COMPARE_COLS:
         if c not in df_gel.columns:
@@ -127,17 +128,17 @@ def compute_delta(df_gel, df_tt, empty_mode="null"):
     to_delete_ids = sorted(list(ids_tt - ids_gel))   # TT pas GEL
     intersect_ids = sorted(list(ids_gel & ids_tt))   # communs
 
-    # ---------- CREATE (valeurs GEL telles quelles) ----------
+    # ---------- CREATE (valeurs GEL telles quelles, vides -> "") ----------
     to_createArray = []
     for rid in to_create_ids:
         gel_row = df_gel.loc[rid]
         row_payload = {"IdRegistre": rid}
         for c in COMPARE_COLS:
             row_payload[c] = gel_row.get(c, None)
-        row_payload = apply_empty_mode(row_payload, empty_mode)
+        row_payload = apply_empty_mode(row_payload)
         to_createArray.append(row_payload)
 
-    # ---------- DELETE (infos TT pour vérif) ----------
+    # ---------- DELETE (infos TT pour vérif, vides -> "") ----------
     to_deleteArray = []
     for rid in to_delete_ids:
         if rid in df_tt.index:
@@ -149,13 +150,13 @@ def compute_delta(df_gel, df_tt, empty_mode="null"):
                 rowid = as_str(tt_row.get("RowID"))
                 if rowid:
                     payload["RowID"] = rowid
-            payload = apply_empty_mode(payload, empty_mode)
+            payload = apply_empty_mode(payload)
             to_deleteArray.append(payload)
         else:
             to_deleteArray.append({"IdRegistre": rid})
 
-    # ---------- UPDATE (TT = miroir exact de GEL) ----------
-    # On compare GEL vs TT ; si différent sur au moins un champ, on envoie les valeurs GEL (y compris vides)
+    # ---------- UPDATE (TT = miroir exact de GEL ; vides -> "") ----------
+    # Si différent sur ≥1 champ, on envoie les valeurs GEL telles quelles (y compris vides)
     to_update_rowsArray = []
     for rid in intersect_ids:
         gel_row = df_gel.loc[rid]
@@ -165,23 +166,21 @@ def compute_delta(df_gel, df_tt, empty_mode="null"):
         row_payload = {"IdRegistre": rid}
 
         for c in COMPARE_COLS:
-            gel_v = gel_row.get(c, None)  # peut être None (doit effacer TT)
+            gel_v = gel_row.get(c, None)  # peut être None => doit effacer TT
             tt_v  = tt_row.get(c, None)
 
             if normalize_value(c, gel_v) != normalize_value(c, tt_v):
                 changed = True
 
-            # toujours mettre la valeur GEL (même si vide) pour refléter exactement GEL
-            row_payload[c] = gel_v
+            row_payload[c] = gel_v  # on reflète exactement GEL
 
-        # RowID si dispo côté TT
         if "RowID" in df_tt.columns:
             rowid = as_str(tt_row.get("RowID"))
             if rowid:
                 row_payload["RowID"] = rowid
 
         if changed:
-            row_payload = apply_empty_mode(row_payload, empty_mode)
+            row_payload = apply_empty_mode(row_payload)
             to_update_rowsArray.append(row_payload)
 
     return {
@@ -207,25 +206,14 @@ def compare_endpoint():
     Body JSON (optionnel):
     {
       "gel_url": "...",
-      "tt_url":  "...",
-      "id_col": "IdRegistre",
-      "compare_cols": ["Nom","Prenom","Date_de_naissance","Alias","Nature"],
-      "empty_mode": "null" | "empty_string"   # défaut: "null"
+      "tt_url":  "..."
+      // Vidage en dur: tous les champs vides partent en "" (EMPTY_MODE = "empty_string")
     }
     """
     try:
         body = request.get_json(silent=True) or {}
         gel_url = body.get("gel_url", GEL_URL_DEFAULT)
         tt_url  = body.get("tt_url",  TT_URL_DEFAULT)
-        empty_mode = body.get("empty_mode", "null")
-        if empty_mode not in ("null", "empty_string"):
-            empty_mode = "null"
-
-        global ID_COL, COMPARE_COLS
-        if body.get("id_col"):
-            ID_COL = body["id_col"]
-        if body.get("compare_cols"):
-            COMPARE_COLS = body["compare_cols"]
 
         gel_path = download_csv(gel_url, "gel.csv")
         tt_path  = download_csv(tt_url,  "tt.csv")
@@ -233,7 +221,7 @@ def compare_endpoint():
         df_gel = pd.read_csv(gel_path, dtype=str, keep_default_na=False)
         df_tt  = pd.read_csv(tt_path,  dtype=str, keep_default_na=False)
 
-        delta = compute_delta(df_gel, df_tt, empty_mode=empty_mode)
+        delta = compute_delta(df_gel, df_tt)
         return jsonify({"status": "ok", "message": "Comparaison terminée", **delta})
 
     except Exception as e:
