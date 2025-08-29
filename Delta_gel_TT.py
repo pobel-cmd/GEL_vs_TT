@@ -16,7 +16,7 @@ TT_URL_DEFAULT  = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange
 # Schéma
 ID_COL = "IdRegistre"
 COMPARE_COLS = ["Nom", "Prenom", "Date_de_naissance", "Alias", "Nature"]
-TT_IDCOLS = ["RowID"]  # colonne technique TimeTonic
+TT_IDCOLS = ["RowID"]  # TimeTonic
 
 INVALID_STRINGS = {"", "undefined", "null", "none", "nan"}  # insensible à la casse
 
@@ -79,32 +79,44 @@ def clean_id(val):
     return s
 
 def normalize_value(col, val):
-    """Normalisation pour comparaison (accents/casse/espaces)."""
+    """Pour comparer (accents/casse/espaces)."""
     return normalize_generic(clean_field(val))
+
+def apply_empty_mode(row_dict, empty_mode):
+    """Convertit None -> "" si empty_mode == 'empty_string' (sauf RowID)."""
+    if empty_mode != "empty_string":
+        return row_dict
+    out = {}
+    for k, v in row_dict.items():
+        if k == "RowID":
+            out[k] = v
+        else:
+            out[k] = "" if v is None else v
+    return out
 
 
 # ---------------- Core diff ----------------
-def compute_delta(df_gel, df_tt):
-    # Vérif colonnes
+def compute_delta(df_gel, df_tt, empty_mode="null"):
+    # Vérif colonnes minimales
     for c in [ID_COL] + COMPARE_COLS:
         if c not in df_gel.columns:
             raise ValueError(f"Colonne manquante dans GEL: {c}")
         if c not in df_tt.columns:
             raise ValueError(f"Colonne manquante dans TT: {c}")
 
-    # Colonnes utiles (garder RowID si dispo côté TT)
+    # Garder RowID (TT) si présent
     keep_tt_cols = [ID_COL] + COMPARE_COLS + [c for c in TT_IDCOLS if c in df_tt.columns]
     df_gel = df_gel[[ID_COL] + COMPARE_COLS].copy()
     df_tt  = df_tt[keep_tt_cols].copy()
 
-    # Nettoyage des valeurs
+    # Nettoyage (vide -> None)
     df_gel[ID_COL] = df_gel[ID_COL].apply(clean_id)
     df_tt[ID_COL]  = df_tt[ID_COL].apply(clean_id)
     for c in COMPARE_COLS:
         df_gel[c] = df_gel[c].apply(clean_field)
         df_tt[c]  = df_tt[c].apply(clean_field)
 
-    # Index par ID
+    # Index
     df_gel = df_gel.dropna(subset=[ID_COL]).drop_duplicates(subset=[ID_COL], keep="last").set_index(ID_COL)
     df_tt  = df_tt.dropna(subset=[ID_COL]).drop_duplicates(subset=[ID_COL], keep="last").set_index(ID_COL)
 
@@ -115,14 +127,15 @@ def compute_delta(df_gel, df_tt):
     to_delete_ids = sorted(list(ids_tt - ids_gel))   # TT pas GEL
     intersect_ids = sorted(list(ids_gel & ids_tt))   # communs
 
-    # ---------- CREATE (valeurs GEL) ----------
+    # ---------- CREATE (valeurs GEL telles quelles) ----------
     to_createArray = []
     for rid in to_create_ids:
         gel_row = df_gel.loc[rid]
-        out = {"IdRegistre": rid}
+        row_payload = {"IdRegistre": rid}
         for c in COMPARE_COLS:
-            out[c] = gel_row.get(c, None)
-        to_createArray.append(out)
+            row_payload[c] = gel_row.get(c, None)
+        row_payload = apply_empty_mode(row_payload, empty_mode)
+        to_createArray.append(row_payload)
 
     # ---------- DELETE (infos TT pour vérif) ----------
     to_deleteArray = []
@@ -136,31 +149,39 @@ def compute_delta(df_gel, df_tt):
                 rowid = as_str(tt_row.get("RowID"))
                 if rowid:
                     payload["RowID"] = rowid
+            payload = apply_empty_mode(payload, empty_mode)
             to_deleteArray.append(payload)
         else:
             to_deleteArray.append({"IdRegistre": rid})
 
-    # ---------- UPDATE (ligne GEL + RowID TT + has_Alias) ----------
+    # ---------- UPDATE (TT = miroir exact de GEL) ----------
+    # On compare GEL vs TT ; si différent sur au moins un champ, on envoie les valeurs GEL (y compris vides)
     to_update_rowsArray = []
     for rid in intersect_ids:
         gel_row = df_gel.loc[rid]
         tt_row  = df_tt.loc[rid]
+
         changed = False
+        row_payload = {"IdRegistre": rid}
+
         for c in COMPARE_COLS:
-            if normalize_value(c, gel_row.get(c, None)) != normalize_value(c, tt_row.get(c, None)):
+            gel_v = gel_row.get(c, None)  # peut être None (doit effacer TT)
+            tt_v  = tt_row.get(c, None)
+
+            if normalize_value(c, gel_v) != normalize_value(c, tt_v):
                 changed = True
-                break
+
+            # toujours mettre la valeur GEL (même si vide) pour refléter exactement GEL
+            row_payload[c] = gel_v
+
+        # RowID si dispo côté TT
+        if "RowID" in df_tt.columns:
+            rowid = as_str(tt_row.get("RowID"))
+            if rowid:
+                row_payload["RowID"] = rowid
+
         if changed:
-            row_payload = {"IdRegistre": rid}
-            for c in COMPARE_COLS:
-                row_payload[c] = gel_row.get(c, None)  # valeurs de référence = GEL
-            # RowID si dispo côté TT
-            if "RowID" in df_tt.columns:
-                rowid = as_str(tt_row.get("RowID"))
-                if rowid:
-                    row_payload["RowID"] = rowid
-            # Flag pratique pour router dans Make
-            row_payload["has_Alias"] = bool(row_payload.get("Alias"))
+            row_payload = apply_empty_mode(row_payload, empty_mode)
             to_update_rowsArray.append(row_payload)
 
     return {
@@ -188,13 +209,17 @@ def compare_endpoint():
       "gel_url": "...",
       "tt_url":  "...",
       "id_col": "IdRegistre",
-      "compare_cols": ["Nom","Prenom","Date_de_naissance","Alias","Nature"]
+      "compare_cols": ["Nom","Prenom","Date_de_naissance","Alias","Nature"],
+      "empty_mode": "null" | "empty_string"   # défaut: "null"
     }
     """
     try:
         body = request.get_json(silent=True) or {}
         gel_url = body.get("gel_url", GEL_URL_DEFAULT)
         tt_url  = body.get("tt_url",  TT_URL_DEFAULT)
+        empty_mode = body.get("empty_mode", "null")
+        if empty_mode not in ("null", "empty_string"):
+            empty_mode = "null"
 
         global ID_COL, COMPARE_COLS
         if body.get("id_col"):
@@ -208,7 +233,7 @@ def compare_endpoint():
         df_gel = pd.read_csv(gel_path, dtype=str, keep_default_na=False)
         df_tt  = pd.read_csv(tt_path,  dtype=str, keep_default_na=False)
 
-        delta = compute_delta(df_gel, df_tt)
+        delta = compute_delta(df_gel, df_tt, empty_mode=empty_mode)
         return jsonify({"status": "ok", "message": "Comparaison terminée", **delta})
 
     except Exception as e:
