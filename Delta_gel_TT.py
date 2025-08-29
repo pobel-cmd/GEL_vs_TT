@@ -15,7 +15,7 @@ TT_URL_DEFAULT  = "https://raw.githubusercontent.com/pobel-cmd/make-csv-exchange
 
 # Schéma minimal
 ID_COL = "IdRegistre"
-COMPARE_COLS = ["Nom", "Prenom", "Date_de_naissance"]
+COMPARE_COLS = ["Nom", "Prenom", "Date_de_naissance", "Alias", "Nature"]
 TT_IDCOLS = ["RowID"]  # colonne technique TT
 
 # ---------------- Utils ----------------
@@ -100,7 +100,7 @@ def compute_delta(df_gel, df_tt):
         to_createArray.append(out)
 
     # ---------- DELETE (infos TT complètes pour vérif) ----------
-    # On renvoie : RowID (si disponible), IdRegistre, Nom, Prenom, Date_de_naissance — tous issus de TT
+    # On renvoie : RowID (si disponible), IdRegistre, Nom, Prenom, Date_de_naissance, Alias, Nature — tous issus de TT
     to_deleteArray = []
     for rid in to_delete_ids:
         if rid in df_tt.index:
@@ -161,7 +161,7 @@ def compare_endpoint():
       "gel_url": "...",
       "tt_url":  "...",
       "id_col": "IdRegistre",
-      "compare_cols": ["Nom","Prenom","Date_de_naissance"]
+      "compare_cols": ["Nom","Prenom","Date_de_naissance", "Alias", "Nature"]
     }
     """
     try:
