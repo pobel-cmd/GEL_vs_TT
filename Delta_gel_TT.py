@@ -18,7 +18,7 @@ ID_COL = "IdRegistre"
 COMPARE_COLS = ["Nom", "Prenom", "Date_de_naissance", "Alias", "Nature"]
 TT_IDCOLS = ["RowID"]  # colonne technique TimeTonic
 
-# Tokens traités comme "vides" en entrée (insensibles à la casse)
+# Tokens traités comme "vides" (insensibles à la casse)
 INVALID_STRINGS = {"", "undefined", "null", "none", "nan"}
 
 # ---------------- Utils ----------------
@@ -43,7 +43,7 @@ def strip_compact(s):
     return s.strip()
 
 def raw_stripped(val):
-    """Chaîne brute trim; None si NaN."""
+    """Texte brut trim (sans normalisation)."""
     return strip_compact(as_str(val))
 
 def remove_accents(s):
@@ -62,7 +62,7 @@ def normalize_generic(s):
     return s
 
 def clean_field(val):
-    """Retourne None si vide/'undefined'/'null'/... sinon valeur trim."""
+    """None si vide/'undefined'/'null'/... sinon valeur trim."""
     s = raw_stripped(val)
     if s is None:
         return None
@@ -102,29 +102,34 @@ def is_invalid_token_nonempty(raw):
 
 
 # ---------------- Core diff ----------------
-def compute_delta(df_gel, df_tt):
+def compute_delta(df_gel_input, df_tt_input):
     # Vérif colonnes minimales
     for c in [ID_COL] + COMPARE_COLS:
-        if c not in df_gel.columns:
+        if c not in df_gel_input.columns:
             raise ValueError(f"Colonne manquante dans GEL: {c}")
-        if c not in df_tt.columns:
+        if c not in df_tt_input.columns:
             raise ValueError(f"Colonne manquante dans TT: {c}")
 
-    # Garder RowID (TT) si présent
-    keep_tt_cols = [ID_COL] + COMPARE_COLS + [c for c in TT_IDCOLS if c in df_tt.columns]
-    df_gel = df_gel[[ID_COL] + COMPARE_COLS].copy()
-    df_tt  = df_tt[keep_tt_cols].copy()
+    # Sélection colonnes utiles
+    df_gel_all = df_gel_input[[ID_COL] + COMPARE_COLS].copy()
+    df_tt_all  = df_tt_input[[ID_COL] + COMPARE_COLS + [c for c in TT_IDCOLS if c in df_tt_input.columns]].copy()
 
-    # Nettoyage (vide -> None)
-    df_gel[ID_COL] = df_gel[ID_COL].apply(clean_id)
-    df_tt[ID_COL]  = df_tt[ID_COL].apply(clean_id)
+    # --- RAW COPIES (pour détecter 'undefined' & co) ---
+    df_gel_raw = df_gel_all.copy()
+    df_tt_raw  = df_tt_all.copy()
+
+    # Indexer les RAW sur un ID nettoyé pour aligner avec les CLEAN
+    df_gel_raw["_IDCLEAN_"] = df_gel_raw[ID_COL].apply(clean_id)
+    df_tt_raw["_IDCLEAN_"]  = df_tt_raw[ID_COL].apply(clean_id)
+    df_gel_raw = df_gel_raw.dropna(subset=["_IDCLEAN_"]).drop_duplicates(subset=["_IDCLEAN_"], keep="last").set_index("_IDCLEAN_")
+    df_tt_raw  = df_tt_raw.dropna(subset=["_IDCLEAN_"]).drop_duplicates(subset=["_IDCLEAN_"], keep="last").set_index("_IDCLEAN_")
+
+    # --- CLEAN COPIES (pour la sortie) ---
+    df_gel = df_gel_raw.copy()
+    df_tt  = df_tt_raw.copy()
     for c in COMPARE_COLS:
         df_gel[c] = df_gel[c].apply(clean_field)
         df_tt[c]  = df_tt[c].apply(clean_field)
-
-    # Index
-    df_gel = df_gel.dropna(subset=[ID_COL]).drop_duplicates(subset=[ID_COL], keep="last").set_index(ID_COL)
-    df_tt  = df_tt.dropna(subset=[ID_COL]).drop_duplicates(subset=[ID_COL], keep="last").set_index(ID_COL)
 
     ids_gel = set(df_gel.index)
     ids_tt  = set(df_tt.index)
@@ -133,7 +138,7 @@ def compute_delta(df_gel, df_tt):
     to_delete_ids = sorted(list(ids_tt - ids_gel))   # TT pas GEL
     intersect_ids = sorted(list(ids_gel & ids_tt))   # communs
 
-    # ---------- CREATE (valeurs GEL telles quelles, vides -> "") ----------
+    # ---------- CREATE (valeurs GEL clean, vides -> "") ----------
     to_createArray = []
     for rid in to_create_ids:
         gel_row = df_gel.loc[rid]
@@ -143,16 +148,18 @@ def compute_delta(df_gel, df_tt):
         row_payload = apply_empty_mode(row_payload)
         to_createArray.append(row_payload)
 
-    # ---------- DELETE (infos TT pour vérif, vides -> "") ----------
+    # ---------- DELETE (infos TT clean + RowID, vides -> "") ----------
     to_deleteArray = []
     for rid in to_delete_ids:
         if rid in df_tt.index:
-            tt_row = df_tt.loc[rid]
+            tt_row_clean = df_tt.loc[rid]
+            tt_row_raw   = df_tt_raw.loc[rid]
             payload = {"IdRegistre": rid}
             for c in COMPARE_COLS:
-                payload[c] = tt_row.get(c, None)
-            if "RowID" in df_tt.columns:
-                rowid = as_str(tt_row.get("RowID"))
+                payload[c] = tt_row_clean.get(c, None)
+            # RowID depuis RAW (non nettoyé)
+            if "RowID" in tt_row_raw.index:
+                rowid = as_str(tt_row_raw.get("RowID"))
                 if rowid:
                     payload["RowID"] = rowid
             payload = apply_empty_mode(payload)
@@ -161,37 +168,38 @@ def compute_delta(df_gel, df_tt):
             to_deleteArray.append({"IdRegistre": rid})
 
     # ---------- UPDATE (TT = miroir exact de GEL ; vides -> "") ----------
-    # On force update si TT contient un token 'undefined'/'null'/... et que GEL est vide.
     to_update_rowsArray = []
     for rid in intersect_ids:
-        gel_row = df_gel.loc[rid]
-        tt_row  = df_tt.loc[rid]
+        gel_row_clean = df_gel.loc[rid]
+        tt_row_clean  = df_tt.loc[rid]
+        gel_row_raw   = df_gel_raw.loc[rid]
+        tt_row_raw    = df_tt_raw.loc[rid]
 
         changed = False
         row_payload = {"IdRegistre": rid}
 
         for c in COMPARE_COLS:
-            # valeurs brutes (avant nettoyage) pour détecter les tokens 'undefined'
-            gel_raw = raw_stripped(gel_row.get(c, None))
-            tt_raw  = raw_stripped(tt_row.get(c, None))
+            # bruts (pour détecter 'undefined' côté TT)
+            gel_raw = raw_stripped(gel_row_raw.get(c, None))
+            tt_raw  = raw_stripped(tt_row_raw.get(c, None))
 
-            # valeurs nettoyées (None si vide/undefined/null/...)
-            gel_v_clean = clean_field(gel_raw)
-            tt_v_clean  = clean_field(tt_raw)
+            # nettoyés (pour comparer au sens métier)
+            gel_v = gel_row_clean.get(c, None)  # peut être None
+            tt_v  = tt_row_clean.get(c, None)
 
-            # 1) Cas spécial: TT a un token 'undefined' (ou null/none/nan) NON vide et GEL est vide -> forcer update
+            # A) Cas spécial: TT a 'undefined' (ou null/none/nan) non vide ET GEL est vide -> changer
             if is_invalid_token_nonempty(tt_raw) and (gel_raw is None or gel_raw == ""):
                 changed = True
-            # 2) Sinon: comparer normalement
-            elif normalize_value(c, gel_v_clean) != normalize_value(c, tt_v_clean):
+            # B) Sinon: comparer normalisé
+            elif normalize_value(c, gel_v) != normalize_value(c, tt_v):
                 changed = True
 
-            # Miroir exact GEL : on met la valeur GEL (nettoyée), sera convertie en "" si None
-            row_payload[c] = gel_v_clean
+            # miroir exact de GEL (valeur nettoyée)
+            row_payload[c] = gel_v
 
-        # RowID si dispo côté TT
-        if "RowID" in df_tt.columns:
-            rowid = as_str(tt_row.get("RowID"))
+        # RowID depuis RAW
+        if "RowID" in tt_row_raw.index:
+            rowid = as_str(tt_row_raw.get("RowID"))
             if rowid:
                 row_payload["RowID"] = rowid
 
